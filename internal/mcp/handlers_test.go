@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +71,9 @@ func createTestHandlers() (*Handlers, *mockReader) {
 	cache := &mockCache{mem: make(map[string]*domain.Index)}
 	reader := &mockReader{files: map[string]string{"docs/test.md": "# Test\n\nContent"}}
 	idx := indexer.New(cache, mockParser{}, mockSearcher{}, reader, mockClock{})
-	return NewHandlers(idx), reader
+	// Use a discard logger for tests
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return NewHandlers(idx, logger), reader
 }
 
 // getTextFromResult extracts text content from MCP result

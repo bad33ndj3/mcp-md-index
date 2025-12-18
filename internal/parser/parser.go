@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/domain"
+	"github.com/bad33ndj3/mcp-md-index/internal/text"
 )
 
 // Parser defines how markdown content is split into chunks.
@@ -43,39 +44,11 @@ func NewMarkdownParser() *MarkdownParser {
 // headingRe matches markdown headings like "## Introduction" or "# Title".
 var headingRe = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
 
-// tokenRe matches alphanumeric words (used for term extraction).
-var tokenRe = regexp.MustCompile(`[a-zA-Z0-9_]+`)
+// codeBlockStartRe matches the start of a fenced code block: ```language
+var codeBlockStartRe = regexp.MustCompile("^```(\\w*)\\s*$")
 
-// stopwords are common words we filter out during term extraction.
-// They don't help distinguish between chunks, so we skip them.
-var stopwords = map[string]struct{}{
-	"the": {}, "and": {}, "or": {}, "to": {}, "of": {}, "in": {},
-	"a": {}, "an": {}, "for": {}, "with": {}, "on": {}, "is": {},
-	"are": {}, "as": {}, "by": {}, "be": {}, "over": {},
-}
-
-// NormalizeTerms converts text into a list of searchable terms.
-// It lowercases, tokenizes, removes stopwords, and skips single-char tokens.
-//
-// Example: "The Consumer is configured" → ["consumer", "configured"]
-func NormalizeTerms(text string) []string {
-	text = strings.ToLower(text)
-	raw := tokenRe.FindAllString(text, -1)
-
-	out := make([]string, 0, len(raw))
-	for _, t := range raw {
-		// Skip single-character tokens (usually not meaningful)
-		if len(t) <= 1 {
-			continue
-		}
-		// Skip stopwords
-		if _, isStopword := stopwords[t]; isStopword {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
-}
+// codeBlockEndRe matches the end of a fenced code block: ```
+var codeBlockEndRe = regexp.MustCompile("^```\\s*$")
 
 // DocIDForPath generates a unique, stable identifier for a file path.
 // Uses SHA256 of the absolute path, truncated to 16 chars.
@@ -83,6 +56,47 @@ func DocIDForPath(path string) string {
 	abs, _ := filepath.Abs(path)
 	sum := sha256.Sum256([]byte(abs))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// isSeparatorCell checks if a table cell is just separator dashes (e.g., "---" or ":---:")
+func isSeparatorCell(cell string) bool {
+	cell = strings.TrimSpace(cell)
+	if cell == "" {
+		return true
+	}
+	// Table separator rows look like: | --- | :---: | ---: |
+	for _, r := range cell {
+		if r != '-' && r != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// headingStack tracks the current heading hierarchy for breadcrumb paths.
+type headingStack struct {
+	levels []int    // Heading level (1-6)
+	titles []string // Heading text
+}
+
+func (h *headingStack) push(level int, title string) {
+	// Pop any headers at same or lower level
+	for len(h.levels) > 0 && h.levels[len(h.levels)-1] >= level {
+		h.levels = h.levels[:len(h.levels)-1]
+		h.titles = h.titles[:len(h.titles)-1]
+	}
+	h.levels = append(h.levels, level)
+	h.titles = append(h.titles, title)
+}
+
+func (h *headingStack) path() []string {
+	if len(h.titles) == 0 {
+		return nil
+	}
+	// Return a copy to avoid mutation
+	result := make([]string, len(h.titles))
+	copy(result, h.titles)
+	return result
 }
 
 // Parse splits a markdown file into chunks.
@@ -107,44 +121,131 @@ func (p *MarkdownParser) Parse(path, content string) ([]domain.Chunk, map[string
 	curBuf := make([]string, 0, 256)
 	blankRun := 0 // Count consecutive blank lines
 
+	// Heading hierarchy for breadcrumb paths
+	headings := &headingStack{}
+
+	// Code block extraction state
+	var codeBlocks []domain.CodeBlock
+	inCodeBlock := false
+	codeBlockLang := ""
+	codeBlockStart := 0
+	var codeBlockBuf []string
+
+	// Table extraction state
+	var tableRows []domain.TableRow
+
 	var chunks []domain.Chunk
 
 	// flush saves the current buffer as a chunk
 	flush := func(endLine int) {
-		text := strings.TrimSpace(strings.Join(curBuf, "\n"))
-		if text == "" {
+		txt := strings.TrimSpace(strings.Join(curBuf, "\n"))
+		if txt == "" {
 			curBuf = curBuf[:0]
 			curStart = endLine + 1
+			codeBlocks = nil
+			tableRows = nil
 			return
 		}
-		chunks = append(chunks, domain.Chunk{
-			ChunkID:   fmt.Sprintf("%s:%d-%d", docID, curStart, endLine),
-			DocID:     docID,
-			Path:      path,
-			Title:     curTitle,
-			StartLine: curStart,
-			EndLine:   endLine,
-			Text:      text,
-			Terms:     NormalizeTerms(text),
-		})
+
+		chunk := domain.Chunk{
+			ChunkID:     fmt.Sprintf("%s:%d-%d", docID, curStart, endLine),
+			DocID:       docID,
+			Path:        path,
+			Title:       curTitle,
+			HeadingPath: headings.path(),
+			StartLine:   curStart,
+			EndLine:     endLine,
+			Text:        txt,
+			Terms:       text.NormalizeTerms(txt), // Use shared package
+			CodeBlocks:  codeBlocks,
+			TableRows:   tableRows,
+			HasCode:     len(codeBlocks) > 0,
+		}
+		chunks = append(chunks, chunk)
+
 		curBuf = curBuf[:0]
 		curStart = endLine + 1
+		codeBlocks = nil
+		tableRows = nil
+	}
+
+	// parseTableRow extracts cells from a markdown table row
+	parseTableRow := func(line string) []string {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "|") {
+			return nil
+		}
+		// Split by | and clean up
+		parts := strings.Split(line, "|")
+		cells := make([]string, 0, len(parts))
+		for _, p := range parts {
+			cell := strings.TrimSpace(p)
+			if cell != "" && !isSeparatorCell(cell) {
+				cells = append(cells, cell)
+			}
+		}
+		return cells
 	}
 
 	// Process each line
 	for i, line := range lines {
 		ln := i + 1 // 1-indexed line number
 
+		// Handle code block boundaries
+		if inCodeBlock {
+			if codeBlockEndRe.MatchString(line) {
+				// End of code block
+				codeBlocks = append(codeBlocks, domain.CodeBlock{
+					Language: codeBlockLang,
+					Code:     strings.Join(codeBlockBuf, "\n"),
+					Line:     codeBlockStart,
+				})
+				inCodeBlock = false
+				codeBlockBuf = nil
+				curBuf = append(curBuf, line)
+				continue
+			}
+			codeBlockBuf = append(codeBlockBuf, line)
+			curBuf = append(curBuf, line)
+			continue
+		}
+
+		// Check for code block start
+		if m := codeBlockStartRe.FindStringSubmatch(line); m != nil {
+			inCodeBlock = true
+			codeBlockLang = m[1]
+			codeBlockStart = ln
+			codeBlockBuf = nil
+			curBuf = append(curBuf, line)
+			continue
+		}
+
 		// Check if this is a heading
 		if m := headingRe.FindStringSubmatch(line); m != nil {
+			level := len(m[1]) // Number of # characters
+			title := m[2]
+
 			// If we have enough content, flush before starting new section
 			if len(curBuf) >= minLines {
 				flush(ln - 1)
 			}
-			curTitle = m[2] // Use heading text as new title
+
+			headings.push(level, title)
+			curTitle = title
 			curBuf = append(curBuf, line)
 			blankRun = 0
 			continue
+		}
+
+		// Check for table rows (starts with |)
+		if strings.HasPrefix(strings.TrimSpace(line), "|") {
+			cells := parseTableRow(line)
+			if len(cells) > 0 {
+				tableRows = append(tableRows, domain.TableRow{
+					Cells: cells,
+					Line:  ln,
+				})
+			}
 		}
 
 		// Track blank lines (used to split on paragraph breaks)
@@ -183,4 +284,10 @@ func (p *MarkdownParser) Parse(path, content string) ([]domain.Chunk, map[string
 	}
 
 	return chunks, docFreq
+}
+
+// NormalizeTerms is exported for backward compatibility.
+// New code should use text.NormalizeTerms directly.
+func NormalizeTerms(s string) []string {
+	return text.NormalizeTerms(s)
 }

@@ -19,7 +19,7 @@ lint:
 # Clean build artifacts and cache
 clean:
 	rm -f mcp-md-index
-	rm -rf .mcp-mdx-cache
+	rm -rf .mcp-md-index-cache
 
 # Install dependencies
 deps:
@@ -28,3 +28,10 @@ deps:
 # Format code
 fmt:
 	go fmt ./...
+
+install:
+	go install .
+
+# Follow today's debug log
+logs:
+	tail -f .mcp-md-index-cache/debug-$$(date +%Y-%m-%d).txt

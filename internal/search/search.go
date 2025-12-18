@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/domain"
+	"github.com/bad33ndj3/mcp-md-index/internal/text"
 )
 
 // Searcher defines how queries are matched against indexed documents.
@@ -27,13 +28,17 @@ type BM25Searcher struct {
 	// B controls length normalization (default: 0.75)
 	// 0 = no normalization, 1 = full normalization
 	B float64
+
+	// CodeBoost gives extra weight to chunks containing code (default: 1.2)
+	CodeBoost float64
 }
 
 // NewBM25Searcher creates a searcher with standard BM25 parameters.
 func NewBM25Searcher() *BM25Searcher {
 	return &BM25Searcher{
-		K1: 1.2,
-		B:  0.75,
+		K1:        1.2,
+		B:         0.75,
+		CodeBoost: 1.2,
 	}
 }
 
@@ -52,15 +57,30 @@ func approxTokens(s string) int {
 
 // formatExcerpt creates a markdown-formatted excerpt with source link.
 func formatExcerpt(c domain.Chunk) string {
-	return fmt.Sprintf(
-		"### %s\nSource: %s#L%d-L%d\n\n%s\n",
-		c.Title, c.Path, c.StartLine, c.EndLine, c.Text,
-	)
+	var sb strings.Builder
+
+	// Add heading with breadcrumb if available
+	if len(c.HeadingPath) > 1 {
+		// Show parent context: "Parent > Title"
+		sb.WriteString("### ")
+		sb.WriteString(strings.Join(c.HeadingPath[len(c.HeadingPath)-2:], " › "))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("### ")
+		sb.WriteString(c.Title)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("Source: %s#L%d-L%d\n\n", c.Path, c.StartLine, c.EndLine))
+	sb.WriteString(c.Text)
+	sb.WriteString("\n")
+
+	return sb.String()
 }
 
 // scoreChunks ranks all chunks against the query using BM25.
-func (s *BM25Searcher) scoreChunks(idx *domain.Index, query string, normalizeTerms func(string) []string) []scoredChunk {
-	qTerms := normalizeTerms(query)
+func (s *BM25Searcher) scoreChunks(idx *domain.Index, query string) []scoredChunk {
+	qTerms := text.NormalizeTerms(query) // Use shared package
 	if len(qTerms) == 0 {
 		return nil
 	}
@@ -85,11 +105,15 @@ func (s *BM25Searcher) scoreChunks(idx *domain.Index, query string, normalizeTer
 
 	k1 := s.K1
 	b := s.B
+	codeBoost := s.CodeBoost
 	if k1 == 0 {
 		k1 = 1.2
 	}
 	if b == 0 {
 		b = 0.75
+	}
+	if codeBoost == 0 {
+		codeBoost = 1.2
 	}
 
 	// Score each chunk
@@ -123,6 +147,11 @@ func (s *BM25Searcher) scoreChunks(idx *domain.Index, query string, normalizeTer
 			score += idf * ((f * (k1 + 1.0)) / den) * float64(qf)
 		}
 
+		// Boost chunks with code blocks (often what users are looking for)
+		if c.HasCode && score > 0 {
+			score *= codeBoost
+		}
+
 		if score > 0 {
 			out = append(out, scoredChunk{Chunk: c, Score: score})
 		}
@@ -139,7 +168,7 @@ func (s *BM25Searcher) Search(idx *domain.Index, query string, maxTokens int) st
 		maxTokens = domain.DefaultMaxTokens
 	}
 
-	scored := s.scoreChunks(idx, query, NormalizeTermsForSearch)
+	scored := s.scoreChunks(idx, query)
 	if len(scored) == 0 {
 		return "No relevant excerpts found in the indexed document."
 	}
@@ -187,51 +216,6 @@ func (s *BM25Searcher) Search(idx *domain.Index, query string, maxTokens int) st
 		return "Token limit too small to return any excerpt."
 	}
 	return b.String()
-}
-
-// NormalizeTermsForSearch is a copy of parser.NormalizeTerms to avoid circular import.
-// In a larger codebase, this would be in a shared util package.
-func NormalizeTermsForSearch(text string) []string {
-	text = strings.ToLower(text)
-
-	// Simple token extraction
-	var tokens []string
-	start := -1
-	for i, r := range text {
-		isAlnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
-		if isAlnum {
-			if start == -1 {
-				start = i
-			}
-		} else {
-			if start != -1 {
-				tokens = append(tokens, text[start:i])
-				start = -1
-			}
-		}
-	}
-	if start != -1 {
-		tokens = append(tokens, text[start:])
-	}
-
-	// Stopwords to filter
-	stopwords := map[string]struct{}{
-		"the": {}, "and": {}, "or": {}, "to": {}, "of": {}, "in": {},
-		"a": {}, "an": {}, "for": {}, "with": {}, "on": {}, "is": {},
-		"are": {}, "as": {}, "by": {}, "be": {},
-	}
-
-	out := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		if len(t) <= 1 {
-			continue
-		}
-		if _, isStopword := stopwords[t]; isStopword {
-			continue
-		}
-		out = append(out, t)
-	}
-	return out
 }
 
 func min(a, b int) int {

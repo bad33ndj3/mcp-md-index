@@ -7,10 +7,24 @@ import "time"
 
 // CacheVersion is incremented when the cache format changes.
 // This ensures old, incompatible caches are rejected and rebuilt.
-const CacheVersion = 1
+const CacheVersion = 3
 
 // DefaultMaxTokens is the default token limit for query responses.
 const DefaultMaxTokens = 500
+
+// CodeBlock represents a fenced code block extracted from markdown.
+type CodeBlock struct {
+	Language string `json:"language,omitempty"` // e.g., "go", "yaml", "bash"
+	Code     string `json:"code"`
+	Line     int    `json:"line"` // Starting line number
+}
+
+// TableRow represents a row from a markdown table.
+// Used to index API docs with field/type/description tables.
+type TableRow struct {
+	Cells []string `json:"cells"` // Cell contents
+	Line  int      `json:"line"`  // Line number
+}
 
 // Chunk represents a single section of a markdown document.
 // Each chunk is a searchable unit with its own title, text, and location.
@@ -30,6 +44,10 @@ type Chunk struct {
 	// Title is the heading text (e.g., "Consumer Configuration")
 	Title string `json:"title"`
 
+	// HeadingPath is the breadcrumb of parent headings for context
+	// e.g., ["NATS Guide", "Consumers", "Durable Consumers"]
+	HeadingPath []string `json:"heading_path,omitempty"`
+
 	// StartLine is the 1-indexed line where this chunk begins
 	StartLine int `json:"start_line"`
 
@@ -42,6 +60,15 @@ type Chunk struct {
 	// Terms is a list of normalized, searchable words extracted from Text.
 	// Stopwords like "the", "and", "or" are removed; everything is lowercased.
 	Terms []string `json:"terms"`
+
+	// CodeBlocks are fenced code blocks extracted from this chunk
+	CodeBlocks []CodeBlock `json:"code_blocks,omitempty"`
+
+	// TableRows are markdown table rows extracted from this chunk
+	TableRows []TableRow `json:"table_rows,omitempty"`
+
+	// HasCode indicates if this chunk contains code blocks (for quick filtering)
+	HasCode bool `json:"has_code,omitempty"`
 }
 
 // Index represents a fully parsed and indexed markdown document.
