@@ -4,12 +4,14 @@
 package indexer
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/bad33ndj3/mcp-md-index/internal/cache"
 	"github.com/bad33ndj3/mcp-md-index/internal/domain"
+	"github.com/bad33ndj3/mcp-md-index/internal/embedding"
 	"github.com/bad33ndj3/mcp-md-index/internal/fetcher"
 	"github.com/bad33ndj3/mcp-md-index/internal/parser"
 	"github.com/bad33ndj3/mcp-md-index/internal/search"
@@ -49,12 +52,35 @@ type Indexer struct {
 	reader   FileReader
 	clock    Clock
 	fetcher  fetcher.Fetcher
+
+	// Embedding support (optional, experimental)
+	embedder    embedding.Embedder // nil if embeddings disabled
+	embedStatus *embedding.Status  // tracks per-doc embedding readiness
+	logger      *slog.Logger       // for async error logging
+}
+
+// Option configures the Indexer.
+type Option func(*Indexer)
+
+// WithEmbedder enables async embedding generation during indexing.
+func WithEmbedder(e embedding.Embedder, status *embedding.Status) Option {
+	return func(idx *Indexer) {
+		idx.embedder = e
+		idx.embedStatus = status
+	}
+}
+
+// WithLogger sets a logger for async operations.
+func WithLogger(l *slog.Logger) Option {
+	return func(idx *Indexer) {
+		idx.logger = l
+	}
 }
 
 // New creates an Indexer with all its dependencies injected.
 // This is the constructor pattern for dependency injection.
-func New(c cache.Cache, p parser.Parser, s search.Searcher, r FileReader, clk Clock, f fetcher.Fetcher) *Indexer {
-	return &Indexer{
+func New(c cache.Cache, p parser.Parser, s search.Searcher, r FileReader, clk Clock, f fetcher.Fetcher, opts ...Option) *Indexer {
+	idx := &Indexer{
 		cache:    c,
 		parser:   p,
 		searcher: s,
@@ -62,6 +88,10 @@ func New(c cache.Cache, p parser.Parser, s search.Searcher, r FileReader, clk Cl
 		clock:    clk,
 		fetcher:  f,
 	}
+	for _, opt := range opts {
+		opt(idx)
+	}
+	return idx
 }
 
 // LoadResult contains information about a loaded document.
@@ -136,6 +166,11 @@ func (idx *Indexer) Load(path string) (*LoadResult, error) {
 	idx.cache.Set(docID, index)
 	if err := idx.cache.SaveToDisk(index); err != nil {
 		return nil, fmt.Errorf("save cache: %w", err)
+	}
+
+	// 6. Generate embeddings in background (NON-BLOCKING)
+	if idx.embedder != nil {
+		go idx.generateEmbeddingsAsync(index)
 	}
 
 	return &LoadResult{
@@ -552,4 +587,50 @@ type RealClock struct{}
 // Now returns the current time.
 func (RealClock) Now() time.Time {
 	return time.Now()
+}
+
+// generateEmbeddingsAsync generates embeddings in background and updates cache.
+// This runs as a goroutine to keep Load() non-blocking.
+func (idx *Indexer) generateEmbeddingsAsync(index *domain.Index) {
+	ctx := context.Background()
+
+	// Collect chunk texts
+	texts := make([]string, len(index.Chunks))
+	for i, c := range index.Chunks {
+		texts[i] = c.Text
+	}
+
+	// Generate embeddings (this is the slow part, ~100-500ms)
+	embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
+	if err != nil {
+		// Log error but don't fail - BM25 still works
+		if idx.logger != nil {
+			idx.logger.Warn("failed to generate embeddings",
+				"doc_id", index.DocID,
+				"error", err)
+		}
+		return
+	}
+
+	// Update chunks with embeddings
+	if len(embeddings) == len(index.Chunks) {
+		for i := range index.Chunks {
+			index.Chunks[i].Embedding = embeddings[i]
+		}
+
+		// Update caches
+		idx.cache.Set(index.DocID, index)
+		_ = idx.cache.SaveToDisk(index) // Best-effort, already saved without embeddings
+
+		// Mark as ready for hybrid search
+		if idx.embedStatus != nil {
+			idx.embedStatus.SetReady(index.DocID)
+		}
+
+		if idx.logger != nil {
+			idx.logger.Debug("embeddings generated",
+				"doc_id", index.DocID,
+				"chunks", len(index.Chunks))
+		}
+	}
 }

@@ -69,6 +69,10 @@ type Chunk struct {
 
 	// HasCode indicates if this chunk contains code blocks (for quick filtering)
 	HasCode bool `json:"has_code,omitempty"`
+
+	// Embedding is the vector representation of this chunk (optional, experimental).
+	// Only populated when --experimental-embeddings is enabled.
+	Embedding []float32 `json:"embedding,omitempty"`
 }
 
 // Index represents a fully parsed and indexed markdown document.

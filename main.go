@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/cache"
+	"github.com/bad33ndj3/mcp-md-index/internal/embedding"
 	"github.com/bad33ndj3/mcp-md-index/internal/fetcher"
 	"github.com/bad33ndj3/mcp-md-index/internal/indexer"
 	mcphandlers "github.com/bad33ndj3/mcp-md-index/internal/mcp"
@@ -61,6 +62,12 @@ func main() {
 
 	// --- 0. Parse flags ---
 	cacheDir := flag.String("cache-dir", defaultCacheDir, "Directory for cache and log files")
+	experimentalEmbeddings := flag.Bool("experimental-embeddings", false,
+		"Enable Ollama-based semantic search (experimental, non-blocking)")
+	ollamaHost := flag.String("ollama-host", "http://localhost:11434",
+		"Ollama server URL for embeddings")
+	ollamaModel := flag.String("ollama-model", "nomic-embed-text",
+		"Ollama embedding model to use")
 	flag.Parse()
 
 	// --- 1. Setup file-based debug logger ---
@@ -92,8 +99,31 @@ func main() {
 	// Parser: splits markdown into searchable chunks
 	mdParser := parser.NewMarkdownParser()
 
-	// Searcher: ranks chunks using BM25 algorithm
-	bm25Searcher := search.NewBM25Searcher()
+	// --- 2. Setup Searcher (BM25 or Hybrid) ---
+	var searcher search.Searcher
+	var embedder embedding.Embedder
+	var embedStatus *embedding.Status
+
+	if *experimentalEmbeddings {
+		embedCfg := embedding.Config{
+			Host:  *ollamaHost,
+			Model: *ollamaModel,
+		}
+		var err error
+		embedder, err = embedding.NewOllamaEmbedder(embedCfg)
+		if err != nil {
+			logger.Warn("failed to create embedder, using BM25 only", "error", err)
+			searcher = search.NewBM25Searcher()
+		} else {
+			embedStatus = embedding.NewStatus()
+			searcher = search.NewHybridSearcher(embedder, embedStatus)
+			logger.Info("experimental embeddings enabled (async)",
+				"model", *ollamaModel,
+				"host", *ollamaHost)
+		}
+	} else {
+		searcher = search.NewBM25Searcher()
+	}
 
 	// File reader: reads from the actual filesystem
 	fileReader := indexer.OSFileReader{}
@@ -104,9 +134,15 @@ func main() {
 	// Site fetcher: converts websites to markdown
 	siteFetcher := fetcher.NewHTTPFetcher()
 
-	// --- 2. Wire up the indexer (orchestrator) ---
+	// --- 3. Wire up the indexer (orchestrator) ---
 
-	idx := indexer.New(fileCache, mdParser, bm25Searcher, fileReader, clock, siteFetcher)
+	var idxOpts []indexer.Option
+	idxOpts = append(idxOpts, indexer.WithLogger(logger))
+	if embedder != nil {
+		idxOpts = append(idxOpts, indexer.WithEmbedder(embedder, embedStatus))
+	}
+
+	idx := indexer.New(fileCache, mdParser, searcher, fileReader, clock, siteFetcher, idxOpts...)
 
 	// --- 3. Create MCP handlers ---
 

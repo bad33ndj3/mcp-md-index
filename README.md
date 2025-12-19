@@ -17,6 +17,7 @@ An open-source MCP server that indexes your markdown documentation locally, cach
 
 - 📄 **Smart chunking** – Splits markdown by headings with configurable min/max lines per chunk
 - 🔍 **BM25 scoring** – Uses TF-IDF based ranking to find the most relevant excerpts
+- 🧠 **Hybrid Search** – (Experimental) Combines BM25 with Ollama embeddings for semantic similarity
 - 🔗 **Source links** – Every excerpt includes `path#L<start>-L<end>` for easy navigation
 - 📦 **Persistent cache** – Indexes survive server restarts (file hash validation)
 - ⚡ **Token-bounded** – Returns excerpts that fit within your specified token limit (default: 500)
@@ -230,6 +231,36 @@ Add to your `AGENTS.md`:
 ```markdown
 For documentation lookup: use `docs_list` first, then `docs_query` (searches all docs if no path given), or `docs_load_glob`/`site_loads` to load new docs.
 ```
+
+## Experimental: Ollama Embeddings
+
+Enable semantic search using vector embeddings from [Ollama](https://ollama.com/). This allows `docs_query` to find relevant content even when exact keywords don't match.
+
+### Setup
+
+1. **Install Ollama** and pull an embedding model:
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+
+2. **Run with the experimental flag**:
+   ```bash
+   mcp-md-index -experimental-embeddings
+   ```
+
+### Architecture
+
+- **Non-blocking**: `docs_load` returns immediately; embeddings are generated in the background.
+- **Hybrid Scoring**: Once embeddings are ready, search results are ranked using a combination of BM25 (30%) and Cosine Similarity (70%).
+- **Resilient**: Automatically falls back to pure BM25 if Ollama is unreachable or embeddings aren't ready yet.
+
+### Configuration Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-experimental-embeddings` | `false` | Enable vector search |
+| `-ollama-host` | `http://localhost:11434` | Ollama API endpoint |
+| `-ollama-model` | `nomic-embed-text` | Embedding model to use |
 
 ## License
 
