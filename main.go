@@ -68,6 +68,19 @@ func main() {
 		"Ollama server URL for embeddings")
 	ollamaModel := flag.String("ollama-model", "nomic-embed-text",
 		"Ollama embedding model to use")
+
+	// Hybrid search flags
+	fusionMethod := flag.String("hybrid-fusion-method", search.FusionMethodRRF,
+		"Fusion method for hybrid search: 'rrf' or 'weighted'")
+	bm25Weight := flag.Float64("hybrid-bm25-weight", 0.3,
+		"BM25 weight for weighted fusion (0.0-1.0)")
+	embedWeight := flag.Float64("hybrid-embed-weight", 0.7,
+		"Embedding weight for weighted fusion (0.0-1.0)")
+	rrfK := flag.Int("hybrid-rrf-k", search.DefaultRRFK,
+		"K constant for Reciprocal Rank Fusion")
+	maxConcurrent := flag.Int("max-concurrent-embeddings", 2,
+		"Maximum number of concurrent embedding tasks")
+
 	flag.Parse()
 
 	// --- 1. Setup file-based debug logger ---
@@ -116,10 +129,14 @@ func main() {
 			searcher = search.NewBM25Searcher()
 		} else {
 			embedStatus = embedding.NewStatus()
-			searcher = search.NewHybridSearcher(embedder, embedStatus)
+			hybrid := search.NewHybridSearcher(embedder, embedStatus)
+			hybrid.WithFusionMethod(*fusionMethod, *bm25Weight, *embedWeight, *rrfK)
+			searcher = hybrid
+
 			logger.Info("experimental embeddings enabled (async)",
 				"model", *ollamaModel,
-				"host", *ollamaHost)
+				"host", *ollamaHost,
+				"fusion", *fusionMethod)
 		}
 	} else {
 		searcher = search.NewBM25Searcher()
@@ -140,6 +157,7 @@ func main() {
 	idxOpts = append(idxOpts, indexer.WithLogger(logger))
 	if embedder != nil {
 		idxOpts = append(idxOpts, indexer.WithEmbedder(embedder, embedStatus))
+		idxOpts = append(idxOpts, indexer.WithMaxConcurrentEmbeddings(*maxConcurrent))
 	}
 
 	idx := indexer.New(fileCache, mdParser, searcher, fileReader, clock, siteFetcher, idxOpts...)

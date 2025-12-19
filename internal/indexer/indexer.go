@@ -57,6 +57,7 @@ type Indexer struct {
 	embedder    embedding.Embedder // nil if embeddings disabled
 	embedStatus *embedding.Status  // tracks per-doc embedding readiness
 	logger      *slog.Logger       // for async error logging
+	sem         chan struct{}      // concurrency limit for embeddings
 }
 
 // Option configures the Indexer.
@@ -74,6 +75,16 @@ func WithEmbedder(e embedding.Embedder, status *embedding.Status) Option {
 func WithLogger(l *slog.Logger) Option {
 	return func(idx *Indexer) {
 		idx.logger = l
+	}
+}
+
+// WithMaxConcurrentEmbeddings sets the maximum number of concurrent embedding tasks.
+func WithMaxConcurrentEmbeddings(n int) Option {
+	if n <= 0 {
+		n = 1
+	}
+	return func(idx *Indexer) {
+		idx.sem = make(chan struct{}, n)
 	}
 }
 
@@ -592,15 +603,21 @@ func (RealClock) Now() time.Time {
 // generateEmbeddingsAsync generates embeddings in background and updates cache.
 // This runs as a goroutine to keep Load() non-blocking.
 func (idx *Indexer) generateEmbeddingsAsync(index *domain.Index) {
-	ctx := context.Background()
-
-	// Collect chunk texts
-	texts := make([]string, len(index.Chunks))
-	for i, c := range index.Chunks {
-		texts[i] = c.Text
+	// Respect concurrency limit if set
+	if idx.sem != nil {
+		idx.sem <- struct{}{}
+		defer func() { <-idx.sem }()
 	}
 
-	// Generate embeddings (this is the slow part, ~100-500ms)
+	ctx := context.Background()
+
+	// Collect chunk texts with additional semantic context (headings)
+	texts := make([]string, len(index.Chunks))
+	for i, c := range index.Chunks {
+		texts[i] = idx.prepareTextForEmbedding(c)
+	}
+
+	// Generate embeddings (this is the slow part)
 	embeddings, err := idx.embedder.EmbedBatch(ctx, texts)
 	if err != nil {
 		// Log error but don't fail - BM25 still works
@@ -633,4 +650,15 @@ func (idx *Indexer) generateEmbeddingsAsync(index *domain.Index) {
 				"chunks", len(index.Chunks))
 		}
 	}
+}
+
+// prepareTextForEmbedding prepends heading path to chunk text for better semantic context.
+func (idx *Indexer) prepareTextForEmbedding(chunk domain.Chunk) string {
+	var sb strings.Builder
+	if len(chunk.HeadingPath) > 0 {
+		sb.WriteString(strings.Join(chunk.HeadingPath, " > "))
+		sb.WriteString(": ")
+	}
+	sb.WriteString(chunk.Text)
+	return sb.String()
 }

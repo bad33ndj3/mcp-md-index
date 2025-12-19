@@ -54,36 +54,17 @@ func (e *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		return nil, nil
 	}
 
-	// Ollama's Embed API can process multiple inputs
-	results := make([][]float32, len(texts))
-
-	// Process in batches to avoid overwhelming the API
-	const batchSize = 10
-	for i := 0; i < len(texts); i += batchSize {
-		end := i + batchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
-
-		batch := texts[i:end]
-		for j, text := range batch {
-			resp, err := e.client.Embed(ctx, &api.EmbedRequest{
-				Model: e.model,
-				Input: text,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("ollama embed batch[%d]: %w", i+j, err)
-			}
-
-			if len(resp.Embeddings) == 0 {
-				return nil, fmt.Errorf("ollama returned no embeddings for batch[%d]", i+j)
-			}
-
-			results[i+j] = resp.Embeddings[0]
-		}
+	// Ollama's Embed API can process multiple inputs in a single request.
+	// We pass the slice directly to Input.
+	resp, err := e.client.Embed(ctx, &api.EmbedRequest{
+		Model: e.model,
+		Input: texts,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ollama embed batch: %w", err)
 	}
 
-	return results, nil
+	return resp.Embeddings, nil
 }
 
 // Available checks if Ollama is reachable and the model is available.

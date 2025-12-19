@@ -31,7 +31,6 @@ func (m *mockEmbedder) Available(ctx context.Context) bool {
 func TestHybridSearcher(t *testing.T) {
 	status := embedding.NewStatus()
 	embedder := &mockEmbedder{available: true}
-	searcher := NewHybridSearcher(embedder, status)
 
 	idx := &domain.Index{
 		DocID: "test-doc",
@@ -53,18 +52,37 @@ func TestHybridSearcher(t *testing.T) {
 		NumChunks: 2,
 	}
 
-	// 1. Initially, not ready, should use BM25
-	res := searcher.Search(idx, "apple", 100)
-	if res == "" {
-		t.Errorf("expected BM25 result")
-	}
+	t.Run("InitiallyNotReady", func(t *testing.T) {
+		searcher := NewHybridSearcher(embedder, status)
+		res := searcher.Search(idx, "apple", 100)
+		if res == "" || !contains(res, "apple") {
+			t.Errorf("expected BM25 result for apple")
+		}
+	})
 
-	// 2. Mark as ready, should use Hybrid
 	status.SetReady("test-doc")
-	res = searcher.Search(idx, "apple", 100)
-	if res == "" {
-		t.Errorf("expected Hybrid result")
-	}
+
+	t.Run("HybridRRF", func(t *testing.T) {
+		searcher := NewHybridSearcher(embedder, status)
+		searcher.WithFusionMethod(FusionMethodRRF, 0, 0, 60)
+		res := searcher.Search(idx, "apple", 100)
+		if res == "" {
+			t.Errorf("expected Hybrid (RRF) result")
+		}
+	})
+
+	t.Run("HybridWeighted", func(t *testing.T) {
+		searcher := NewHybridSearcher(embedder, status)
+		searcher.WithFusionMethod(FusionMethodWeighted, 0.3, 0.7, 0)
+		res := searcher.Search(idx, "apple", 100)
+		if res == "" {
+			t.Errorf("expected Hybrid (Weighted) result")
+		}
+	})
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s[:len(substr)] == substr || contains(s[1:], substr))
 }
 
 func TestCosineSimilarity(t *testing.T) {

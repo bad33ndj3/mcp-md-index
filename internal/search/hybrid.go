@@ -9,6 +9,12 @@ import (
 	"github.com/bad33ndj3/mcp-md-index/internal/embedding"
 )
 
+const (
+	FusionMethodWeighted = "weighted"
+	FusionMethodRRF      = "rrf"
+	DefaultRRFK          = 60
+)
+
 // HybridSearcher combines BM25 keyword search with embedding cosine similarity.
 // Uses BM25 until embeddings are ready, then combines both scores.
 type HybridSearcher struct {
@@ -16,20 +22,33 @@ type HybridSearcher struct {
 	status   *embedding.Status
 	bm25     *BM25Searcher
 
-	// Weights for hybrid scoring (should sum to 1.0)
-	bm25Weight  float64 // default: 0.3
-	embedWeight float64 // default: 0.7
+	// Configuration
+	fusionMethod string
+	bm25Weight   float64 // for weighted fusion
+	embedWeight  float64 // for weighted fusion
+	rrfK         int     // for RRF fusion
 }
 
 // NewHybridSearcher creates a searcher that combines BM25 and embeddings.
 func NewHybridSearcher(e embedding.Embedder, status *embedding.Status) *HybridSearcher {
 	return &HybridSearcher{
-		embedder:    e,
-		status:      status,
-		bm25:        NewBM25Searcher(),
-		bm25Weight:  0.3,
-		embedWeight: 0.7,
+		embedder:     e,
+		status:       status,
+		bm25:         NewBM25Searcher(),
+		fusionMethod: FusionMethodRRF,
+		bm25Weight:   0.3,
+		embedWeight:  0.7,
+		rrfK:         DefaultRRFK,
 	}
+}
+
+// WithFusionMethod sets the fusion method and parameters.
+func (s *HybridSearcher) WithFusionMethod(method string, bm25Weight, embedWeight float64, rrfK int) *HybridSearcher {
+	s.fusionMethod = method
+	s.bm25Weight = bm25Weight
+	s.embedWeight = embedWeight
+	s.rrfK = rrfK
+	return s
 }
 
 // Search uses hybrid scoring if embeddings ready, else BM25 only.
@@ -72,8 +91,16 @@ func (s *HybridSearcher) Search(idx *domain.Index, query string, maxTokens int) 
 	return s.bm25.buildResponse(scored, maxTokens)
 }
 
-// scoreHybrid combines BM25 and cosine similarity scores.
+// scoreHybrid selects the configured fusion method.
 func (s *HybridSearcher) scoreHybrid(idx *domain.Index, query string, queryEmbed []float32) []scoredChunk {
+	if s.fusionMethod == FusionMethodWeighted {
+		return s.scoreWeighted(idx, query, queryEmbed)
+	}
+	return s.scoreRRF(idx, query, queryEmbed)
+}
+
+// scoreWeighted combines BM25 and cosine similarity scores using weighted average.
+func (s *HybridSearcher) scoreWeighted(idx *domain.Index, query string, queryEmbed []float32) []scoredChunk {
 	// Get BM25 scores
 	bm25Scores := s.bm25.scoreChunks(idx, query)
 
@@ -116,6 +143,66 @@ func (s *HybridSearcher) scoreHybrid(idx *domain.Index, query string, queryEmbed
 
 		if hybridScore > 0 {
 			results = append(results, scoredChunk{chunk: chunk, score: hybridScore})
+		}
+	}
+
+	// Sort by score descending
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].score > results[j].score
+	})
+
+	return results
+}
+
+// scoreRRF combines scores using Reciprocal Rank Fusion.
+func (s *HybridSearcher) scoreRRF(idx *domain.Index, query string, queryEmbed []float32) []scoredChunk {
+	// 1. Get BM25 ranks
+	bm25Scores := s.bm25.scoreChunks(idx, query)
+	bm25Ranks := make(map[string]int)
+	for i, sc := range bm25Scores {
+		bm25Ranks[sc.chunk.ChunkID] = i + 1
+	}
+
+	// 2. Get Embedding ranks
+	type embedRank struct {
+		chunkID string
+		score   float64
+	}
+	embedScores := make([]embedRank, 0, len(idx.Chunks))
+	for _, chunk := range idx.Chunks {
+		if chunk.Embedding != nil {
+			sim := cosineSimilarity(queryEmbed, chunk.Embedding)
+			embedScores = append(embedScores, embedRank{chunkID: chunk.ChunkID, score: sim})
+		}
+	}
+	sort.Slice(embedScores, func(i, j int) bool {
+		return embedScores[i].score > embedScores[j].score
+	})
+
+	embedRanks := make(map[string]int)
+	for i, es := range embedScores {
+		embedRanks[es.chunkID] = i + 1
+	}
+
+	// 3. Combine using RRF formula: 1 / (k + rank)
+	rrfScores := make(map[string]float64)
+	k := float64(s.rrfK)
+
+	// Add BM25 contribution
+	for chunkID, rank := range bm25Ranks {
+		rrfScores[chunkID] += 1.0 / (k + float64(rank))
+	}
+
+	// Add Embedding contribution
+	for chunkID, rank := range embedRanks {
+		rrfScores[chunkID] += 1.0 / (k + float64(rank))
+	}
+
+	// 4. Convert back to scoredChunks
+	results := make([]scoredChunk, 0, len(rrfScores))
+	for _, chunk := range idx.Chunks {
+		if score, ok := rrfScores[chunk.ChunkID]; ok {
+			results = append(results, scoredChunk{chunk: chunk, score: score})
 		}
 	}
 
