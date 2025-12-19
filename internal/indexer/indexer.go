@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/cache"
@@ -155,8 +156,16 @@ type LoadGlobResult struct {
 	Results []*LoadResult
 }
 
+// loadJobResult holds the result of loading a single file.
+type loadJobResult struct {
+	path   string
+	result *LoadResult
+	err    error
+}
+
 // LoadGlob loads all files matching a glob pattern.
 // Supports ** for recursive directory matching (e.g., "docs/**/*.md").
+// Uses parallel workers for improved performance on multi-core systems.
 func (idx *Indexer) LoadGlob(pattern string) (*LoadGlobResult, error) {
 	if pattern == "" {
 		return nil, errors.New("pattern is required")
@@ -180,30 +189,87 @@ func (idx *Indexer) LoadGlob(pattern string) (*LoadGlobResult, error) {
 		return nil, fmt.Errorf("no files match pattern: %s", pattern)
 	}
 
-	result := &LoadGlobResult{
-		Results: make([]*LoadResult, 0, len(matches)),
-	}
-
-	// Load each file
+	// Filter out directories upfront
+	files := make([]string, 0, len(matches))
 	for _, path := range matches {
-		// Skip directories
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
 			continue
 		}
+		files = append(files, path)
+	}
 
-		loadResult, err := idx.Load(path)
-		if err != nil {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no files match pattern: %s", pattern)
+	}
+
+	result := &LoadGlobResult{
+		Results: make([]*LoadResult, 0, len(files)),
+		Errors:  make([]string, 0),
+	}
+
+	// For small file counts, load sequentially (avoid goroutine overhead)
+	if len(files) <= 2 {
+		for _, path := range files {
+			loadResult, err := idx.Load(path)
+			if err != nil {
+				result.Failed++
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", path, err))
+				continue
+			}
+			result.Loaded++
+			if loadResult.FromCache {
+				result.Cached++
+			}
+			result.Results = append(result.Results, loadResult)
+		}
+		return result, nil
+	}
+
+	// Use worker pool for parallel loading
+	const maxWorkers = 4
+	jobs := make(chan string, len(files))
+	results := make(chan loadJobResult, len(files))
+
+	// Start workers
+	var wg sync.WaitGroup
+	for i := 0; i < maxWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				loadResult, err := idx.Load(path)
+				results <- loadJobResult{path: path, result: loadResult, err: err}
+			}
+		}()
+	}
+
+	// Send jobs
+	go func() {
+		for _, path := range files {
+			jobs <- path
+		}
+		close(jobs)
+	}()
+
+	// Wait for workers and close results
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	for r := range results {
+		if r.err != nil {
 			result.Failed++
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", path, err))
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", r.path, r.err))
 			continue
 		}
-
 		result.Loaded++
-		if loadResult.FromCache {
+		if r.result.FromCache {
 			result.Cached++
 		}
-		result.Results = append(result.Results, loadResult)
+		result.Results = append(result.Results, r.result)
 	}
 
 	return result, nil
