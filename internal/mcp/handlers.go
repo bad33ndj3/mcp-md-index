@@ -26,6 +26,17 @@ type QueryArgs struct {
 	MaxTokens int    `json:"max_tokens,omitempty" jsonschema_description:"Approx max tokens to return (default 500)"`
 }
 
+// SiteLoadsArgs defines the arguments for the site_loads tool.
+type SiteLoadsArgs struct {
+	URLs  []string `json:"urls" jsonschema_description:"URLs of websites to fetch and convert to markdown"`
+	Force bool     `json:"force,omitempty" jsonschema_description:"Force re-fetch even if cached (default: false)"`
+}
+
+// LoadGlobArgs defines the arguments for the docs_load_glob tool.
+type LoadGlobArgs struct {
+	Pattern string `json:"pattern" jsonschema_description:"Glob pattern to match markdown files (e.g. 'docs/**/*.md', '*.md')"`
+}
+
 // Handlers wraps the indexer and provides MCP tool handlers.
 type Handlers struct {
 	indexer *indexer.Indexer
@@ -74,31 +85,78 @@ func (h *Handlers) DocsLoad(ctx context.Context, req *mcp.CallToolRequest, args 
 	}, nil, nil
 }
 
+// DocsLoadGlob handles the docs_load_glob tool call.
+// It loads multiple markdown files matching a glob pattern.
+func (h *Handlers) DocsLoadGlob(ctx context.Context, req *mcp.CallToolRequest, args LoadGlobArgs) (*mcp.CallToolResult, any, error) {
+	if strings.TrimSpace(args.Pattern) == "" {
+		h.logger.Error("docs_load_glob: pattern is required")
+		return nil, nil, fmt.Errorf("pattern is required")
+	}
+
+	h.logger.Debug("docs_load_glob: loading files", "pattern", args.Pattern)
+
+	result, err := h.indexer.LoadGlob(args.Pattern)
+	if err != nil {
+		h.logger.Error("docs_load_glob: failed", "pattern", args.Pattern, "error", err)
+		return nil, nil, err
+	}
+
+	h.logger.Info("docs_load_glob: success",
+		"pattern", args.Pattern,
+		"loaded", result.Loaded,
+		"cached", result.Cached,
+		"failed", result.Failed,
+	)
+
+	// Keep response concise - just summary stats
+	totalChunks := 0
+	for _, r := range result.Results {
+		totalChunks += r.NumChunks
+	}
+
+	msg := fmt.Sprintf("Loaded %d files (%d cached), %d chunks total", result.Loaded, result.Cached, totalChunks)
+	if result.Failed > 0 {
+		msg += fmt.Sprintf(", %d failed", result.Failed)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+	}, nil, nil
+}
+
 // DocsQuery handles the docs_query tool call.
 // It searches an indexed document and returns token-bounded excerpts.
+// If no doc_id or path is provided, searches across all loaded documents.
 func (h *Handlers) DocsQuery(ctx context.Context, req *mcp.CallToolRequest, args QueryArgs) (*mcp.CallToolResult, any, error) {
 	docID := strings.TrimSpace(args.DocID)
 	path := strings.TrimSpace(args.Path)
 	prompt := strings.TrimSpace(args.Prompt)
-
-	if docID == "" && path == "" {
-		h.logger.Error("docs_query: doc_id or path is required")
-		return nil, nil, fmt.Errorf("doc_id or path is required")
-	}
 
 	if prompt == "" {
 		h.logger.Error("docs_query: prompt is required")
 		return nil, nil, fmt.Errorf("prompt is required")
 	}
 
-	h.logger.Debug("docs_query: searching",
-		"doc_id", docID,
-		"path", path,
-		"prompt", prompt,
-		"max_tokens", args.MaxTokens,
-	)
+	var answer string
+	var err error
 
-	answer, err := h.indexer.Query(docID, path, prompt, args.MaxTokens)
+	// If no doc_id or path, search all documents
+	if docID == "" && path == "" {
+		h.logger.Debug("docs_query: searching all documents",
+			"prompt", prompt,
+			"max_tokens", args.MaxTokens,
+		)
+		answer, err = h.indexer.QueryAll(prompt, args.MaxTokens)
+	} else {
+		h.logger.Debug("docs_query: searching specific document",
+			"doc_id", docID,
+			"path", path,
+			"prompt", prompt,
+			"max_tokens", args.MaxTokens,
+		)
+		answer, err = h.indexer.Query(docID, path, prompt, args.MaxTokens)
+	}
+
 	if err != nil {
 		h.logger.Error("docs_query: failed", "error", err)
 		return nil, nil, err
@@ -111,5 +169,84 @@ func (h *Handlers) DocsQuery(ctx context.Context, req *mcp.CallToolRequest, args
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: answer}},
+	}, nil, nil
+}
+
+// SiteLoads handles the site_loads tool call.
+// It fetches multiple websites, converts HTML to markdown, and caches them for future queries.
+func (h *Handlers) SiteLoads(ctx context.Context, req *mcp.CallToolRequest, args SiteLoadsArgs) (*mcp.CallToolResult, any, error) {
+	if len(args.URLs) == 0 {
+		h.logger.Error("site_loads: urls is required")
+		return nil, nil, fmt.Errorf("urls is required (provide at least one URL)")
+	}
+
+	h.logger.Debug("site_loads: fetching sites", "count", len(args.URLs), "force", args.Force)
+
+	var sb strings.Builder
+	loaded, cached, failed := 0, 0, 0
+
+	for _, url := range args.URLs {
+		url = strings.TrimSpace(url)
+		if url == "" {
+			continue
+		}
+
+		result, err := h.indexer.LoadSite(url, args.Force)
+		if err != nil {
+			h.logger.Error("site_loads: failed to load", "url", url, "error", err)
+			failed++
+			sb.WriteString(fmt.Sprintf("- FAILED: %s (%v)\n", url, err))
+			continue
+		}
+
+		loaded++
+		if result.FromCache {
+			cached++
+		}
+		sb.WriteString(fmt.Sprintf("- %s (chunks: %d)\n", url, result.NumChunks))
+	}
+
+	h.logger.Info("site_loads: complete",
+		"loaded", loaded,
+		"cached", cached,
+		"failed", failed,
+	)
+
+	header := fmt.Sprintf("Loaded %d sites (%d from cache, %d failed)\n\n", loaded, cached, failed)
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: header + sb.String()}},
+	}, nil, nil
+}
+
+// DocsList handles the docs_list tool call.
+// It returns a list of all currently cached documents.
+func (h *Handlers) DocsList(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+	h.logger.Debug("docs_list: listing cached documents")
+
+	docs := h.indexer.List()
+
+	if len(docs) == 0 {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "No documents currently loaded. Use docs_load or site_load first."}},
+		}, nil, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Loaded documents: %d\n\n", len(docs)))
+
+	for _, doc := range docs {
+		sb.WriteString(fmt.Sprintf("- doc_id: %s\n", doc.DocID))
+		if doc.SourceURL != "" {
+			sb.WriteString(fmt.Sprintf("  url: %s\n", doc.SourceURL))
+		}
+		sb.WriteString(fmt.Sprintf("  path: %s\n", doc.Path))
+		sb.WriteString(fmt.Sprintf("  chunks: %d\n", doc.NumChunks))
+		sb.WriteString(fmt.Sprintf("  indexed_at: %s\n\n", doc.IndexedAt.Format(time.RFC3339)))
+	}
+
+	h.logger.Info("docs_list: success", "count", len(docs))
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
 	}, nil, nil
 }

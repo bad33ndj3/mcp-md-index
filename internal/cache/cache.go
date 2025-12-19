@@ -39,6 +39,16 @@ type Cache interface {
 
 	// SaveToDisk persists an index to disk for future sessions.
 	SaveToDisk(idx *domain.Index) error
+
+	// SaveMarkdown saves the raw markdown content to a file.
+	// Returns the path to the saved file.
+	SaveMarkdown(docID string, content string) (string, error)
+
+	// MarkdownPath returns the path where markdown for a docID is stored.
+	MarkdownPath(docID string) string
+
+	// List returns all document IDs currently in memory cache.
+	List() []string
 }
 
 // FileCache implements Cache using JSON files on disk.
@@ -124,4 +134,38 @@ func (c *FileCache) SaveToDisk(idx *domain.Index) error {
 	}
 
 	return nil
+}
+
+// MarkdownPath returns the path where markdown for a docID would be stored.
+func (c *FileCache) MarkdownPath(docID string) string {
+	return filepath.Join(c.cacheDir, fmt.Sprintf("%s.md", docID))
+}
+
+// SaveMarkdown saves raw markdown content to a file.
+// Returns the absolute path to the saved file.
+func (c *FileCache) SaveMarkdown(docID string, content string) (string, error) {
+	path := c.MarkdownPath(docID)
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write markdown file: %w", err)
+	}
+
+	// Return absolute path for use in source links
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return path, nil // Fall back to relative path
+	}
+	return absPath, nil
+}
+
+// List returns all document IDs currently in memory cache.
+func (c *FileCache) List() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	docIDs := make([]string, 0, len(c.mem))
+	for docID := range c.mem {
+		docIDs = append(docIDs, docID)
+	}
+	return docIDs
 }

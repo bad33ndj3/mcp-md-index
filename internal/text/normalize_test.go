@@ -49,7 +49,7 @@ func TestNormalizeTerms_FiltersStopwords(t *testing.T) {
 
 	// Should filter: "the", "over"
 	for _, term := range got {
-		if _, isStop := Stopwords[term]; isStop {
+		if IsStopword(term) {
 			t.Errorf("Stopword %q should have been filtered", term)
 		}
 	}
@@ -58,5 +58,60 @@ func TestNormalizeTerms_FiltersStopwords(t *testing.T) {
 	expected := []string{"quick", "brown", "fox", "jumps", "lazy", "dog"}
 	if len(got) != len(expected) {
 		t.Errorf("Got %d terms, want %d: %v", len(got), len(expected), got)
+	}
+}
+
+// --- Benchmarks ---
+
+// BenchmarkNormalizeTerms_Short measures performance on typical short text.
+func BenchmarkNormalizeTerms_Short(b *testing.B) {
+	input := "The consumer is configured with these options"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NormalizeTerms(input)
+	}
+}
+
+// BenchmarkNormalizeTerms_Long measures performance on longer documentation text.
+func BenchmarkNormalizeTerms_Long(b *testing.B) {
+	input := `NATS JetStream is a persistence layer for NATS that provides streaming,
+message replay, and exactly-once semantics. A consumer is a stateful view of
+a stream. It tracks which messages have been delivered and acknowledged.
+Durable consumers persist their state across restarts. They are identified
+by a unique name within the stream. Ephemeral consumers are automatically
+cleaned up when there are no active subscriptions for a configured period.`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NormalizeTerms(input)
+	}
+}
+
+// BenchmarkNormalizeTerms_WithHTML measures performance when HTML stripping is needed.
+func BenchmarkNormalizeTerms_WithHTML(b *testing.B) {
+	input := `<p>The <a href="http://example.com">consumer</a> is configured with
+<code>AckPolicy</code> and other &amp; options.</p>`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = NormalizeTerms(input)
+	}
+}
+
+// BenchmarkStripHTML measures HTML tag and entity removal.
+func BenchmarkStripHTML(b *testing.B) {
+	input := `<div class="docs"><p>Hello <strong>world</strong> &amp; friends!</p></div>`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = StripHTML(input)
+	}
+}
+
+// BenchmarkIsStopword measures stopword lookup performance.
+func BenchmarkIsStopword(b *testing.B) {
+	words := []string{"the", "consumer", "is", "configured", "with"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, w := range words {
+			_ = IsStopword(w)
+		}
 	}
 }

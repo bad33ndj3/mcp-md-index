@@ -217,10 +217,3 @@ func (s *BM25Searcher) Search(idx *domain.Index, query string, maxTokens int) st
 	}
 	return b.String()
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

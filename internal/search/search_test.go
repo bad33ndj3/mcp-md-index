@@ -164,3 +164,123 @@ func TestApproxTokens(t *testing.T) {
 		}
 	}
 }
+
+// --- Benchmarks ---
+
+// createTestIndex creates an index with n chunks for benchmarking.
+func createTestIndex(n int) *domain.Index {
+	chunks := make([]domain.Chunk, n)
+	docFreq := make(map[string]int)
+
+	for i := 0; i < n; i++ {
+		terms := []string{"consumer", "configuration", "options", "settings"}
+		if i%2 == 0 {
+			terms = append(terms, "durable", "persistence")
+		}
+		if i%3 == 0 {
+			terms = append(terms, "ephemeral", "cleanup")
+		}
+
+		chunks[i] = domain.Chunk{
+			ChunkID:   strings.Repeat("a", 8) + ":" + string(rune('0'+i)) + "-" + string(rune('0'+i+10)),
+			DocID:     "testdoc",
+			Path:      "test.md",
+			Title:     "Section " + string(rune('A'+i%26)),
+			StartLine: i * 10,
+			EndLine:   i*10 + 10,
+			Text:      "This section covers consumer configuration options and settings for the system.",
+			Terms:     terms,
+			HasCode:   i%4 == 0,
+		}
+
+		for _, t := range terms {
+			docFreq[t]++
+		}
+	}
+
+	return &domain.Index{
+		DocID:     "testdoc",
+		Path:      "test.md",
+		Chunks:    chunks,
+		DocFreq:   docFreq,
+		NumChunks: n,
+		Version:   domain.CacheVersion,
+	}
+}
+
+// BenchmarkScoreChunks_Small measures BM25 scoring on a small index.
+func BenchmarkScoreChunks_Small(b *testing.B) {
+	idx := createTestIndex(10)
+	searcher := NewBM25Searcher()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = searcher.scoreChunks(idx, "consumer configuration")
+	}
+}
+
+// BenchmarkScoreChunks_Medium measures BM25 scoring on a medium index.
+func BenchmarkScoreChunks_Medium(b *testing.B) {
+	idx := createTestIndex(50)
+	searcher := NewBM25Searcher()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = searcher.scoreChunks(idx, "consumer configuration")
+	}
+}
+
+// BenchmarkScoreChunks_Large measures BM25 scoring on a large index.
+func BenchmarkScoreChunks_Large(b *testing.B) {
+	idx := createTestIndex(200)
+	searcher := NewBM25Searcher()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = searcher.scoreChunks(idx, "consumer configuration")
+	}
+}
+
+// BenchmarkSearch_Small measures full search on a small index.
+func BenchmarkSearch_Small(b *testing.B) {
+	idx := createTestIndex(10)
+	searcher := NewBM25Searcher()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = searcher.Search(idx, "consumer configuration", 500)
+	}
+}
+
+// BenchmarkSearch_Large measures full search on a large index.
+func BenchmarkSearch_Large(b *testing.B) {
+	idx := createTestIndex(200)
+	searcher := NewBM25Searcher()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = searcher.Search(idx, "consumer configuration", 500)
+	}
+}
+
+// BenchmarkFormatExcerpt measures excerpt formatting.
+func BenchmarkFormatExcerpt(b *testing.B) {
+	chunk := domain.Chunk{
+		ChunkID:     "abc123:10-20",
+		DocID:       "abc123",
+		Path:        "docs/test.md",
+		Title:       "Consumer Configuration",
+		HeadingPath: []string{"NATS Guide", "Consumers", "Consumer Configuration"},
+		StartLine:   10,
+		EndLine:     20,
+		Text:        "This section covers consumer configuration options and settings for NATS JetStream.",
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = formatExcerpt(chunk)
+	}
+}
+
+// BenchmarkApproxTokens measures token approximation.
+func BenchmarkApproxTokens(b *testing.B) {
+	text := "This is a sample text that would be returned as an excerpt from the search results."
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = approxTokens(text)
+	}
+}

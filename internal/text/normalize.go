@@ -1,5 +1,5 @@
-// Package text provides shared text processing utilities.
-// This avoids duplication between parser and search packages.
+// Package text provides shared text processing utilities for normalizing
+// and tokenizing text for search indexing. Used by parser and search packages.
 package text
 
 import (
@@ -7,7 +7,11 @@ import (
 	"strings"
 )
 
-// tokenRe matches alphanumeric words.
+// MinTokenLength is the minimum character count for a token to be indexed.
+// Single-character tokens like "a", "I", "1" add noise without search value.
+const MinTokenLength = 2
+
+// tokenRe matches alphanumeric words (letters, digits, underscores).
 var tokenRe = regexp.MustCompile(`[a-zA-Z0-9_]+`)
 
 // htmlTagRe matches HTML tags like <a>, </p>, <div class="foo">
@@ -16,9 +20,21 @@ var htmlTagRe = regexp.MustCompile(`<[^>]+>`)
 // htmlEntityRe matches HTML entities like &amp; &#39;
 var htmlEntityRe = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
 
-// Stopwords are common words filtered during term extraction.
-// These don't help distinguish between chunks.
-var Stopwords = map[string]struct{}{
+// htmlEntityReplacer decodes common HTML entities to their characters.
+// Using a Replacer is more efficient than repeated ReplaceAll calls.
+var htmlEntityReplacer = strings.NewReplacer(
+	"&amp;", "&",
+	"&lt;", "<",
+	"&gt;", ">",
+	"&quot;", `"`,
+	"&#39;", "'",
+	"&nbsp;", " ",
+)
+
+// stopwords contains common words filtered during term extraction.
+// These appear frequently but don't help distinguish between chunks.
+// Use IsStopword() to check if a term is a stopword.
+var stopwords = map[string]struct{}{
 	// Articles and prepositions
 	"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "to": {},
 	"of": {}, "in": {}, "for": {}, "with": {}, "on": {}, "at": {},
@@ -47,44 +63,52 @@ var Stopwords = map[string]struct{}{
 	"top": {}, "table": {}, "contents": {}, "value": {}, "types": {},
 }
 
+// IsStopword returns true if the term is a common word that should be
+// filtered from search indexes. Stopwords like "the", "and", "is" appear
+// frequently but don't help users find specific content.
+func IsStopword(term string) bool {
+	_, ok := stopwords[term]
+	return ok
+}
+
 // StripHTML removes HTML tags and entities from text.
-// Converts "<a href='x'>link</a> &amp; more" to "link & more"
+// Example: "<a href='x'>link</a> &amp; more" → "link & more"
 func StripHTML(text string) string {
-	// Remove HTML tags
+	// Remove HTML tags first
 	text = htmlTagRe.ReplaceAllString(text, "")
 
-	// Replace common HTML entities
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&#39;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	// Decode common HTML entities
+	text = htmlEntityReplacer.Replace(text)
 
-	// Remove any remaining entities
+	// Remove any remaining/unknown entities (e.g., &mdash;)
 	text = htmlEntityRe.ReplaceAllString(text, "")
 
 	return text
 }
 
 // NormalizeTerms converts text into a list of searchable terms.
-// It strips HTML, lowercases, tokenizes, removes stopwords, and skips short tokens.
+// Processing pipeline:
+//  1. Strip HTML tags and decode entities
+//  2. Lowercase everything
+//  3. Tokenize into alphanumeric words
+//  4. Filter out short tokens (< MinTokenLength chars)
+//  5. Filter out stopwords
 //
 // Example: "The Consumer is configured" → ["consumer", "configured"]
 func NormalizeTerms(text string) []string {
-	// Strip HTML first
+	// Strip HTML first to avoid indexing tag content
 	text = StripHTML(text)
 	text = strings.ToLower(text)
 	raw := tokenRe.FindAllString(text, -1)
 
 	out := make([]string, 0, len(raw))
 	for _, t := range raw {
-		// Skip very short tokens
-		if len(t) <= 1 {
+		// Skip tokens shorter than minimum length (single chars add noise)
+		if len(t) < MinTokenLength {
 			continue
 		}
-		// Skip stopwords
-		if _, isStopword := Stopwords[t]; isStopword {
+		// Skip stopwords (common words with no search value)
+		if IsStopword(t) {
 			continue
 		}
 		out = append(out, t)

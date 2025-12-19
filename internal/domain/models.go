@@ -7,7 +7,7 @@ import "time"
 
 // CacheVersion is incremented when the cache format changes.
 // This ensures old, incompatible caches are rejected and rebuilt.
-const CacheVersion = 3
+const CacheVersion = 4
 
 // DefaultMaxTokens is the default token limit for query responses.
 const DefaultMaxTokens = 500
@@ -77,8 +77,11 @@ type Index struct {
 	// DocID is a unique identifier derived from the file path (SHA256 prefix)
 	DocID string `json:"doc_id"`
 
-	// Path is the original file path that was indexed
+	// Path is the local file path that was indexed (may be cache path for URLs)
 	Path string `json:"path"`
+
+	// SourceURL is the original URL for site_load entries (empty for local files)
+	SourceURL string `json:"source_url,omitempty"`
 
 	// FileHash is a SHA256 hash of the file contents at index time.
 	// Used to detect when a file has changed and needs re-indexing.

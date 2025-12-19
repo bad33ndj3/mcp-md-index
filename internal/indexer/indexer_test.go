@@ -1,120 +1,21 @@
 package indexer
 
 import (
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/domain"
+	"github.com/bad33ndj3/mcp-md-index/internal/testutil"
 )
-
-// --- Mock implementations for testing ---
-
-// mockCache is a simple in-memory cache for testing.
-type mockCache struct {
-	mem  map[string]*domain.Index
-	disk map[string]*domain.Index
-}
-
-func newMockCache() *mockCache {
-	return &mockCache{
-		mem:  make(map[string]*domain.Index),
-		disk: make(map[string]*domain.Index),
-	}
-}
-
-func (m *mockCache) Get(docID string) (*domain.Index, error) {
-	if idx, ok := m.mem[docID]; ok {
-		return idx, nil
-	}
-	return nil, errors.New("not found")
-}
-
-func (m *mockCache) Set(docID string, idx *domain.Index) {
-	m.mem[docID] = idx
-}
-
-func (m *mockCache) LoadFromDisk(docID string) (*domain.Index, error) {
-	if idx, ok := m.disk[docID]; ok {
-		return idx, nil
-	}
-	return nil, errors.New("not found")
-}
-
-func (m *mockCache) SaveToDisk(idx *domain.Index) error {
-	m.disk[idx.DocID] = idx
-	return nil
-}
-
-// mockReader returns controlled file content.
-type mockReader struct {
-	files map[string]string // path -> content
-}
-
-func newMockReader() *mockReader {
-	return &mockReader{files: make(map[string]string)}
-}
-
-func (m *mockReader) ReadFile(path string) ([]byte, error) {
-	if content, ok := m.files[path]; ok {
-		return []byte(content), nil
-	}
-	return nil, errors.New("file not found")
-}
-
-func (m *mockReader) HashFile(path string) (string, error) {
-	if content, ok := m.files[path]; ok {
-		return "hash_" + content[:min(10, len(content))], nil
-	}
-	return "", errors.New("file not found")
-}
-
-// mockParser returns a single chunk for any content.
-type mockParser struct{}
-
-func (mockParser) Parse(path, content string) ([]domain.Chunk, map[string]int) {
-	chunks := []domain.Chunk{
-		{
-			ChunkID: "mock:1-10",
-			DocID:   "mockdoc",
-			Path:    path,
-			Title:   "Mock Section",
-			Text:    content,
-			Terms:   []string{"mock", "test"},
-		},
-	}
-	return chunks, map[string]int{"mock": 1, "test": 1}
-}
-
-// mockSearcher returns fixed content.
-type mockSearcher struct{}
-
-func (mockSearcher) Search(idx *domain.Index, query string, maxTokens int) string {
-	return "Mock search result for: " + query
-}
-
-// mockClock returns a fixed time.
-type mockClock struct {
-	t time.Time
-}
-
-func (m mockClock) Now() time.Time { return m.t }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
 
 // --- Tests ---
 
 func TestLoad_IndexesNewFile(t *testing.T) {
-	cache := newMockCache()
-	reader := newMockReader()
-	reader.files["docs/test.md"] = "# Hello\n\nWorld"
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Hello\n\nWorld"
 
-	indexer := New(cache, mockParser{}, mockSearcher{}, reader, mockClock{t: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)})
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
 
 	result, err := indexer.Load("docs/test.md")
 	if err != nil {
@@ -133,11 +34,11 @@ func TestLoad_IndexesNewFile(t *testing.T) {
 }
 
 func TestLoad_UsesCacheWhenFresh(t *testing.T) {
-	cache := newMockCache()
-	reader := newMockReader()
-	reader.files["docs/test.md"] = "# Hello\n\nWorld"
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Hello\n\nWorld"
 
-	indexer := New(cache, mockParser{}, mockSearcher{}, reader, mockClock{t: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)})
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
 
 	// First load
 	result1, err := indexer.Load("docs/test.md")
@@ -160,11 +61,11 @@ func TestLoad_UsesCacheWhenFresh(t *testing.T) {
 }
 
 func TestLoad_ReindexesWhenFileChanged(t *testing.T) {
-	cache := newMockCache()
-	reader := newMockReader()
-	reader.files["docs/test.md"] = "# Original"
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Original"
 
-	indexer := New(cache, mockParser{}, mockSearcher{}, reader, mockClock{t: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)})
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
 
 	// First load
 	_, err := indexer.Load("docs/test.md")
@@ -173,10 +74,10 @@ func TestLoad_ReindexesWhenFileChanged(t *testing.T) {
 	}
 
 	// Clear memory cache to simulate restart
-	cache.mem = make(map[string]*domain.Index)
+	cache.Mem = make(map[string]*domain.Index)
 
 	// Change file content (hash will change)
-	reader.files["docs/test.md"] = "# Modified content"
+	reader.Files["docs/test.md"] = "# Modified content"
 
 	// Second load should re-index
 	result, err := indexer.Load("docs/test.md")
@@ -190,7 +91,7 @@ func TestLoad_ReindexesWhenFileChanged(t *testing.T) {
 }
 
 func TestLoad_ErrorOnEmptyPath(t *testing.T) {
-	indexer := New(newMockCache(), mockParser{}, mockSearcher{}, newMockReader(), mockClock{})
+	indexer := New(testutil.NewMockCache(), testutil.MockParser{}, testutil.MockSearcher{}, testutil.NewMockReader(), testutil.NewMockClock(time.Time{}), nil)
 
 	_, err := indexer.Load("")
 	if err == nil {
@@ -199,11 +100,11 @@ func TestLoad_ErrorOnEmptyPath(t *testing.T) {
 }
 
 func TestQuery_ReturnsExcerpts(t *testing.T) {
-	cache := newMockCache()
-	reader := newMockReader()
-	reader.files["docs/test.md"] = "# Test\n\nContent here"
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Test\n\nContent here"
 
-	indexer := New(cache, mockParser{}, mockSearcher{}, reader, mockClock{})
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
 
 	// Load first
 	_, err := indexer.Load("docs/test.md")
@@ -223,7 +124,7 @@ func TestQuery_ReturnsExcerpts(t *testing.T) {
 }
 
 func TestQuery_ErrorsWhenNotLoaded(t *testing.T) {
-	indexer := New(newMockCache(), mockParser{}, mockSearcher{}, newMockReader(), mockClock{})
+	indexer := New(testutil.NewMockCache(), testutil.MockParser{}, testutil.MockSearcher{}, testutil.NewMockReader(), testutil.NewMockClock(time.Time{}), nil)
 
 	_, err := indexer.Query("", "docs/nonexistent.md", "test", 500)
 	if err == nil {
@@ -232,11 +133,11 @@ func TestQuery_ErrorsWhenNotLoaded(t *testing.T) {
 }
 
 func TestQuery_ErrorsWithoutPrompt(t *testing.T) {
-	cache := newMockCache()
-	reader := newMockReader()
-	reader.files["docs/test.md"] = "# Test"
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Test"
 
-	indexer := New(cache, mockParser{}, mockSearcher{}, reader, mockClock{})
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
 	_, _ = indexer.Load("docs/test.md")
 
 	_, err := indexer.Query("", "docs/test.md", "", 500) // Empty prompt
@@ -246,10 +147,72 @@ func TestQuery_ErrorsWithoutPrompt(t *testing.T) {
 }
 
 func TestQuery_ErrorsWithoutDocIDOrPath(t *testing.T) {
-	indexer := New(newMockCache(), mockParser{}, mockSearcher{}, newMockReader(), mockClock{})
+	indexer := New(testutil.NewMockCache(), testutil.MockParser{}, testutil.MockSearcher{}, testutil.NewMockReader(), testutil.NewMockClock(time.Time{}), nil)
 
 	_, err := indexer.Query("", "", "test", 500) // Both empty
 	if err == nil {
 		t.Error("Expected error when both doc_id and path are empty")
+	}
+}
+
+// --- Benchmarks ---
+
+// BenchmarkLoad measures single file loading performance.
+func BenchmarkLoad(b *testing.B) {
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = `# Test Document
+
+This is a test document with multiple sections.
+
+## Section One
+
+Content for section one with some text.
+
+## Section Two
+
+Content for section two with more text.
+`
+
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Clear cache to force re-indexing each iteration
+		cache.Mem = make(map[string]*domain.Index)
+		cache.Disk = make(map[string]*domain.Index)
+		_, _ = indexer.Load("docs/test.md")
+	}
+}
+
+// BenchmarkLoad_FromCache measures cache hit performance.
+func BenchmarkLoad_FromCache(b *testing.B) {
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Test\n\nContent"
+
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
+
+	// Pre-load to cache
+	_, _ = indexer.Load("docs/test.md")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = indexer.Load("docs/test.md")
+	}
+}
+
+// BenchmarkQuery measures single document query performance.
+func BenchmarkQuery(b *testing.B) {
+	cache := testutil.NewMockCache()
+	reader := testutil.NewMockReader()
+	reader.Files["docs/test.md"] = "# Test\n\nContent about consumers and configuration"
+
+	indexer := New(cache, testutil.MockParser{}, testutil.MockSearcher{}, reader, testutil.NewMockClock(time.Time{}), nil)
+	_, _ = indexer.Load("docs/test.md")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = indexer.Query("", "docs/test.md", "consumer configuration", 500)
 	}
 }

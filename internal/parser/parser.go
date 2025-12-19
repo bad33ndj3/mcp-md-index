@@ -285,9 +285,3 @@ func (p *MarkdownParser) Parse(path, content string) ([]domain.Chunk, map[string
 
 	return chunks, docFreq
 }
-
-// NormalizeTerms is exported for backward compatibility.
-// New code should use text.NormalizeTerms directly.
-func NormalizeTerms(s string) []string {
-	return text.NormalizeTerms(s)
-}

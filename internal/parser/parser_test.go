@@ -5,68 +5,8 @@ import (
 	"testing"
 )
 
-func TestNormalizeTerms_Basic(t *testing.T) {
-	tests := []struct {
-		input string
-		want  []string
-	}{
-		{
-			input: "Hello World",
-			want:  []string{"hello", "world"},
-		},
-		{
-			input: "The consumer is configured",
-			want:  []string{"consumer", "configured"},
-		},
-		{
-			input: "Go 1.23 supports_underscores",
-			want:  []string{"go", "23", "supports_underscores"},
-		},
-		{
-			input: "a b c", // Single chars filtered
-			want:  []string{},
-		},
-		{
-			input: "", // Empty input
-			want:  []string{},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			got := NormalizeTerms(tc.input)
-			if len(got) != len(tc.want) {
-				t.Errorf("NormalizeTerms(%q) = %v, want %v", tc.input, got, tc.want)
-				return
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("NormalizeTerms(%q)[%d] = %q, want %q", tc.input, i, got[i], tc.want[i])
-				}
-			}
-		})
-	}
-}
-
-func TestNormalizeTerms_RemovesStopwords(t *testing.T) {
-	input := "the quick brown fox jumps over the lazy dog"
-	got := NormalizeTerms(input)
-
-	// "the" and "over" should be filtered
-	for _, term := range got {
-		if term == "the" || term == "over" {
-			t.Errorf("Stopword %q should have been filtered", term)
-		}
-	}
-
-	// "quick", "brown", "fox", "jumps", "lazy", "dog" should remain
-	expected := map[string]bool{"quick": true, "brown": true, "fox": true, "jumps": true, "lazy": true, "dog": true}
-	for _, term := range got {
-		if !expected[term] {
-			t.Errorf("Unexpected term %q in result", term)
-		}
-	}
-}
+// NOTE: NormalizeTerms tests removed - they duplicate text/normalize_test.go.
+// The parser.NormalizeTerms wrapper just delegates to text.NormalizeTerms.
 
 func TestParse_SplitsByHeadings(t *testing.T) {
 	parser := &MarkdownParser{
@@ -124,7 +64,7 @@ func TestParse_RespectMaxLines(t *testing.T) {
 
 	// Create content with no headings but many lines
 	var lines []string
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		lines = append(lines, "This is line number "+string(rune('A'+i)))
 	}
 	content := strings.Join(lines, "\n")
@@ -200,5 +140,99 @@ func TestDocIDForPath_Deterministic(t *testing.T) {
 	// ID should be 16 chars (SHA256 prefix)
 	if len(id1) != 16 {
 		t.Errorf("DocID length = %d, want 16", len(id1))
+	}
+}
+
+// --- Benchmarks ---
+
+// BenchmarkParse_SmallDoc measures parsing of a small markdown document.
+func BenchmarkParse_SmallDoc(b *testing.B) {
+	parser := NewMarkdownParser()
+	content := `# Test Document
+
+This is a simple test document with some content.
+
+## Section One
+
+Content for section one with regular text.
+
+## Section Two
+
+Content for section two with more text.
+`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse("test.md", content)
+	}
+}
+
+// BenchmarkParse_LargeDoc measures parsing of a larger document with code blocks.
+func BenchmarkParse_LargeDoc(b *testing.B) {
+	parser := NewMarkdownParser()
+
+	// Build a larger document
+	var sb strings.Builder
+	sb.WriteString("# Large Test Document\n\n")
+	sb.WriteString("Introduction text for the document.\n\n")
+
+	for i := 0; i < 20; i++ {
+		sb.WriteString("## Section " + string(rune('A'+i)) + "\n\n")
+		sb.WriteString("This section contains information about topic " + string(rune('A'+i)) + ".\n")
+		sb.WriteString("It has multiple lines of content that describe the topic in detail.\n")
+		sb.WriteString("Additional context and examples are provided below.\n\n")
+		sb.WriteString("```go\n")
+		sb.WriteString("func example" + string(rune('A'+i)) + "() {\n")
+		sb.WriteString("    fmt.Println(\"Hello from section " + string(rune('A'+i)) + "\")\n")
+		sb.WriteString("}\n")
+		sb.WriteString("```\n\n")
+	}
+
+	content := sb.String()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse("large.md", content)
+	}
+}
+
+// BenchmarkParse_WithTables measures parsing with markdown tables.
+func BenchmarkParse_WithTables(b *testing.B) {
+	parser := NewMarkdownParser()
+	content := `# API Reference
+
+## Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| name | string | The name of the resource |
+| id | int | Unique identifier |
+| enabled | bool | Whether the feature is enabled |
+| config | object | Configuration options |
+
+## Methods
+
+| Method | Parameters | Returns |
+|--------|------------|---------|
+| Create | name, config | Resource |
+| Update | id, config | Resource |
+| Delete | id | void |
+`
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = parser.Parse("api.md", content)
+	}
+}
+
+// BenchmarkDocIDForPath measures document ID generation.
+func BenchmarkDocIDForPath(b *testing.B) {
+	paths := []string{
+		"docs/api.md",
+		"internal/service/handler.go",
+		"/absolute/path/to/file.md",
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, p := range paths {
+			_ = DocIDForPath(p)
+		}
 	}
 }

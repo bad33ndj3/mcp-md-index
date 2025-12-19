@@ -35,3 +35,19 @@ install:
 # Follow today's debug log
 logs:
 	tail -f .mcp-md-index-cache/debug-$$(date +%Y-%m-%d).txt
+
+# Run benchmarks with memory stats
+bench:
+	go test -bench=. -benchmem ./...
+
+# Run benchmarks and save to file for comparison
+bench-save:
+	go test -bench=. -benchmem ./... | tee bench.txt
+
+# Compare benchmarks (requires benchstat: go install golang.org/x/perf/cmd/benchstat@latest)
+bench-compare:
+	@if [ -f bench_before.txt ] && [ -f bench_after.txt ]; then \
+		benchstat bench_before.txt bench_after.txt; \
+	else \
+		echo "Run 'make bench-save' before and after changes, saving to bench_before.txt and bench_after.txt"; \
+	fi

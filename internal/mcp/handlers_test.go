@@ -32,6 +32,17 @@ func (m *mockCache) LoadFromDisk(docID string) (*domain.Index, error) {
 	return nil, errors.New("not found")
 }
 func (m *mockCache) SaveToDisk(idx *domain.Index) error { return nil }
+func (m *mockCache) MarkdownPath(docID string) string   { return "/mock/" + docID + ".md" }
+func (m *mockCache) SaveMarkdown(docID string, content string) (string, error) {
+	return m.MarkdownPath(docID), nil
+}
+func (m *mockCache) List() []string {
+	docIDs := make([]string, 0, len(m.mem))
+	for docID := range m.mem {
+		docIDs = append(docIDs, docID)
+	}
+	return docIDs
+}
 
 type mockParser struct{}
 
@@ -70,7 +81,7 @@ func (mockClock) Now() time.Time { return time.Date(2024, 1, 1, 0, 0, 0, 0, time
 func createTestHandlers() (*Handlers, *mockReader) {
 	cache := &mockCache{mem: make(map[string]*domain.Index)}
 	reader := &mockReader{files: map[string]string{"docs/test.md": "# Test\n\nContent"}}
-	idx := indexer.New(cache, mockParser{}, mockSearcher{}, reader, mockClock{})
+	idx := indexer.New(cache, mockParser{}, mockSearcher{}, reader, mockClock{}, nil)
 	// Use a discard logger for tests
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return NewHandlers(idx, logger), reader
