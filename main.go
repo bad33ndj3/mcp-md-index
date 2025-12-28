@@ -197,6 +197,16 @@ func main() {
 	}, handlers.SiteLoads)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "read_repository",
+		Description: "Index a source repository with safe defaults (excludes vendor, gen, test files). Use this for loading codebases.",
+	}, handlers.ReadRepository)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "indexing_status",
+		Description: "Check the progress of background indexing (queue depth, embedded count, etc).",
+	}, handlers.IndexingStatus)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "docs_list",
 		Description: "List all currently cached documents (from docs_load or site_load). Returns doc_id, path, and chunk count.",
 	}, handlers.DocsList)

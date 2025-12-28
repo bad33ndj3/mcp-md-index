@@ -251,7 +251,8 @@ Enable semantic search using vector embeddings from [Ollama](https://ollama.com/
 ### Architecture
 
 - **Non-blocking**: `docs_load` returns immediately; embeddings are generated in the background.
-- **Hybrid Scoring**: Once embeddings are ready, search results are ranked using a combination of BM25 (30%) and Cosine Similarity (70%).
+- **Context-Aware**: Embeddings include heading breadcrumbs (e.g., `NATS > Configuration: ...`) for better semantic accuracy.
+- **Hybrid Scoring**: Results are ranked using **Reciprocal Rank Fusion (RRF)** by default, combining BM25 and vector search.
 - **Resilient**: Automatically falls back to pure BM25 if Ollama is unreachable or embeddings aren't ready yet.
 
 ### Configuration Flags
@@ -261,6 +262,11 @@ Enable semantic search using vector embeddings from [Ollama](https://ollama.com/
 | `-experimental-embeddings` | `false` | Enable vector search |
 | `-ollama-host` | `http://localhost:11434` | Ollama API endpoint |
 | `-ollama-model` | `nomic-embed-text` | Embedding model to use |
+| `-hybrid-fusion-method` | `rrf` | `rrf` or `weighted` |
+| `-hybrid-rrf-k` | `60` | Tuning constant for RRF |
+| `-hybrid-bm25-weight` | `0.3` | Weight for BM25 (if using weighted) |
+| `-hybrid-embed-weight` | `0.7` | Weight for Embeddings (if using weighted) |
+| `-max-concurrent-embeddings` | `2` | Max parallel embedding tasks |
 
 ## License
 

@@ -43,6 +43,8 @@ func (m *mockCache) List() []string {
 	}
 	return docIDs
 }
+func (m *mockCache) Hydrate() error { return nil }
+func (m *mockCache) Dir() string    { return "/tmp/test-cache" }
 
 type mockParser struct{}
 

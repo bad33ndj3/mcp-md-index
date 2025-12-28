@@ -4,8 +4,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -218,6 +220,89 @@ func (h *Handlers) SiteLoads(ctx context.Context, req *mcp.CallToolRequest, args
 	}, nil, nil
 }
 
+// ReadRepositoryArgs defines the arguments for the read_repository tool.
+type ReadRepositoryArgs struct {
+	Path     string   `json:"path" jsonschema_description:"Root directory of the repository or service to index"`
+	Excludes []string `json:"excludes,omitempty" jsonschema_description:"Glob patterns to exclude (defaults to vendor, gen, test files)"`
+}
+
+// ReadRepository handles the read_repository tool call.
+// It indexes a codebase with safe defaults for ignoring build artifacts and dependencies.
+func (h *Handlers) ReadRepository(ctx context.Context, req *mcp.CallToolRequest, args ReadRepositoryArgs) (*mcp.CallToolResult, any, error) {
+	root := strings.TrimSpace(args.Path)
+	if root == "" {
+		h.logger.Error("read_repository: path is required")
+		return nil, nil, fmt.Errorf("path is required")
+	}
+
+	h.logger.Debug("read_repository: scanning repo", "path", root)
+
+	// Safe defaults for codebases
+	excludes := []string{
+		"**/vendor/**",
+		"**/node_modules/**",
+		"**/.git/**",
+		"**/dist/**",
+		"**/build/**",
+		"**/*_test.go",
+		"**/*.pb.go",
+		"**/gen/**",
+		"**/generated/**",
+	}
+	// Append user excludes
+	excludes = append(excludes, args.Excludes...)
+
+	// Glob pattern to find code files recursively
+	// We'll target common source extensions.
+	// Note: We use LoadGlob which now supports excludes (to be implemented next)
+	// For now, we will construct a pattern that finds all files, and let LoadGlob filter them.
+	pattern := filepath.Join(root, "**", "*")
+
+	// Pass excludes via a new method or updated LoadGlob.
+	// Since we haven't updated LoadGlob signature yet, we'll do it in two steps.
+	// For now, let's assume we update LoadGlob to take options or we add a new LoadRepo method.
+	// To keep it simple, we will call LoadGlobWithExcludes (which we will add to Indexer).
+
+	// Async load
+	err := h.indexer.LoadGlobAsync(pattern, excludes)
+	if err != nil {
+		h.logger.Error("read_repository: failed to start", "path", root, "error", err)
+		return nil, nil, err
+	}
+
+	h.logger.Info("read_repository: started async", "path", root)
+
+	msg := fmt.Sprintf("Started indexing repository at %s\n\nThis process runs in the background. Use 'docs_list' to check progress or see loaded files.", root)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+	}, nil, nil
+}
+
+// IndexingStatus returns the current progress of the indexing job.
+func (h *Handlers) IndexingStatus(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+	stats := h.indexer.GetStatus()
+
+	resp := map[string]any{
+		"docs_count":     stats.DocsCount,
+		"queue_length":   stats.QueueLength,
+		"embedded_count": stats.EmbeddedCount,
+		"active_workers": stats.ActiveWorkers,
+		"status":         "idle",
+	}
+
+	if stats.QueueLength > 0 || stats.ActiveWorkers > 0 {
+		resp["status"] = "indexing"
+	}
+
+	// Format as JSON
+	jsonBytes, _ := json.MarshalIndent(resp, "", "  ")
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: string(jsonBytes)}},
+	}, nil, nil
+}
+
 // DocsList handles the docs_list tool call.
 // It returns a list of all currently cached documents.
 func (h *Handlers) DocsList(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
@@ -227,21 +312,27 @@ func (h *Handlers) DocsList(ctx context.Context, req *mcp.CallToolRequest, args 
 
 	if len(docs) == 0 {
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "No documents currently loaded. Use docs_load or site_load first."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: "No documents currently loaded. Use docs_load, site_load, or read_repository first."}},
 		}, nil, nil
 	}
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Loaded documents: %d\n\n", len(docs)))
 
-	for _, doc := range docs {
+	// Cap the list to prevent context overflow if 6000 files are loaded
+	const maxDisplay = 50
+	for i, doc := range docs {
+		if i >= maxDisplay {
+			sb.WriteString(fmt.Sprintf("\n... and %d more files.", len(docs)-maxDisplay))
+			break
+		}
 		sb.WriteString(fmt.Sprintf("- doc_id: %s\n", doc.DocID))
 		if doc.SourceURL != "" {
 			sb.WriteString(fmt.Sprintf("  url: %s\n", doc.SourceURL))
 		}
 		sb.WriteString(fmt.Sprintf("  path: %s\n", doc.Path))
 		sb.WriteString(fmt.Sprintf("  chunks: %d\n", doc.NumChunks))
-		sb.WriteString(fmt.Sprintf("  indexed_at: %s\n\n", doc.IndexedAt.Format(time.RFC3339)))
+		// sb.WriteString(fmt.Sprintf("  indexed_at: %s\n\n", doc.IndexedAt.Format(time.RFC3339))) // Compact display
 	}
 
 	h.logger.Info("docs_list: success", "count", len(docs))

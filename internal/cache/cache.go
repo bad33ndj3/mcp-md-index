@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/bad33ndj3/mcp-md-index/internal/domain"
@@ -49,6 +50,13 @@ type Cache interface {
 
 	// List returns all document IDs currently in memory cache.
 	List() []string
+
+	// Hydrate populates the in-memory cache by scanning the disk cache directory.
+	// This ensures previously indexed files are available after restart.
+	Hydrate() error
+
+	// Dir returns the root directory of the cache.
+	Dir() string
 }
 
 // FileCache implements Cache using JSON files on disk.
@@ -57,6 +65,44 @@ type FileCache struct {
 	cacheDir string                   // Directory where .index.json files are stored
 	mem      map[string]*domain.Index // In-memory cache for current session
 	mu       sync.RWMutex             // Protects concurrent access to mem
+}
+
+// ... (NewFileCache, Get, Set methods unchanged) ...
+
+// Hydrate scans the cache directory and loads metadata for all found indexes.
+// It performs a lightweight load (unmarshal) to populate the memory map.
+func (c *FileCache) Hydrate() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entries, err := os.ReadDir(c.cacheDir)
+	if err != nil {
+		return fmt.Errorf("read cache dir: %w", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".index.json") {
+			continue
+		}
+
+		// DocID is filename without extension
+		docID := strings.TrimSuffix(entry.Name(), ".index.json")
+
+		// Load the full index from disk to get metadata
+		// Optimization: We could have a lightweight "Header" struct,
+		// but given the scale (6000 files), loading regular JSONs sequentially is acceptable (seconds).
+		idx, err := c.LoadFromDisk(docID)
+		if err != nil {
+			// Skip corrupted files, maybe log them?
+			continue
+		}
+
+		c.mem[docID] = idx
+		count++
+	}
+
+	return nil
 }
 
 // NewFileCache creates a new FileCache that stores files in the given directory.
@@ -69,6 +115,11 @@ func NewFileCache(cacheDir string) (*FileCache, error) {
 		cacheDir: cacheDir,
 		mem:      make(map[string]*domain.Index),
 	}, nil
+}
+
+// Dir returns the configured cache directory.
+func (c *FileCache) Dir() string {
+	return c.cacheDir
 }
 
 // Get retrieves an index from the in-memory cache.

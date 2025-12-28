@@ -66,6 +66,16 @@ func (m *MockCache) List() []string {
 	return docIDs
 }
 
+func (m *MockCache) Hydrate() error {
+	// Mock hydration does nothing or could pre-fill Mem from Disk if needed for specific tests.
+	// For now, no-op is sufficient.
+	return nil
+}
+
+func (m *MockCache) Dir() string {
+	return "/tmp/mock-cache"
+}
+
 // MockReader returns controlled file content for testing.
 type MockReader struct {
 	Files map[string]string // path -> content
